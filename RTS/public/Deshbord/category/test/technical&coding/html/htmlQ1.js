@@ -549,13 +549,13 @@ const questions = [
     "attempted": false,
     "selected": ""
   }
-<<<<<<< HEAD
+
 ]
-=======
+
 
  ];
 
->>>>>>> 4d76c012fd57c68a884bfe00dbd8092d4157397b
+
 
 
 
