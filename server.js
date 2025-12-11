@@ -1,11 +1,15 @@
+require('dotenv').config();
 const express = require("express");
 const bodyParser = require("body-parser");
 const path = require("path");
 const session = require("express-session");
+const mongoose = require('mongoose');
 const passport = require("passport");
 const dotenv = require("dotenv");
 const connectDB = require("./config/db");
 const cookieParser = require("cookie-parser");
+const helmet = require('helmet');
+const MongoStore = require('connect-mongo'); // Only require, no session parameter
 const cors = require("cors");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
@@ -19,16 +23,73 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 9191;
 
-// Database connection
-connectDB();
+// ========== DATABASE CONNECTION ==========
+const mongoUrl = process.env.MONGODB_URI || 'mongodb://localhost:27017/booklibrary';
 
-// Middleware configuration
+mongoose.connect(mongoUrl, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+})
+.then(async () => {
+    console.log('✅ MongoDB Connected Successfully');
+    
+    const User = require('./models/EbookUser');
+    await User.createDefaultAdmin();
+})
+.catch(err => {
+    console.error('❌ MongoDB Connection Error:', err);
+    process.exit(1);
+});
+
+// ========== SESSION CONFIGURATION ==========
+app.use(session({
+    secret: process.env.SESSION_SECRET || crypto.randomBytes(64).toString("hex"),
+    resave: false,
+    saveUninitialized: false,
+    store: MongoStore.create({
+        mongoUrl: mongoUrl,
+        collectionName: 'sessions',
+        ttl: 24 * 60 * 60 // 1 day in seconds
+    }),
+    cookie: {
+        maxAge: 24 * 60 * 60 * 1000,
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production'
+    }
+}));
+
+// ========== SECURITY MIDDLEWARE ==========
+app.use(helmet({
+    contentSecurityPolicy: false // Temporarily disable for debugging
+}));
+
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+app.use('/ebook/uploads', express.static(path.join(__dirname, 'public/uploads')));
+
+// ========== CREATE UPLOAD DIRECTORIES ==========
+const ensureUploadDirs = () => {
+    const directories = [
+        'public/uploads/pdfs',
+        'public/uploads/covers'
+    ];
+
+    directories.forEach(dir => {
+        const fullPath = path.join(__dirname, dir);
+        if (!fs.existsSync(fullPath)) {
+            fs.mkdirSync(fullPath, { recursive: true });
+            console.log(`✅ Created directory: ${fullPath}`);
+        } else {
+            console.log(`📁 Directory exists: ${fullPath}`);
+        }
+    });
+};
+ensureUploadDirs();
+
+// ========== ADDITIONAL MIDDLEWARE ==========
 const configureMiddleware = () => {
-  app.use(cors());
-  app.use(bodyParser.urlencoded({ extended: true }));
-  app.use(bodyParser.json());
-  app.use(express.json({ limit: "100mb" }));
-  app.use(express.urlencoded({ limit: "100mb", extended: true }));
   app.use(cookieParser());
   
   app.use(
@@ -39,49 +100,70 @@ const configureMiddleware = () => {
     })
   );
   
-  app.use(
-    session({
-      secret: crypto.randomBytes(64).toString("hex"),
-      resave: false,
-      saveUninitialized: true,
-      cookie: { secure: false },
-    })
-  );
-  
   app.use(passport.initialize());
   app.use(passport.session());
   require("./config/passport")(passport);
 };
 
-// View engine setup
+// ========== VIEW ENGINE SETUP ==========
 const configureViews = () => {
   app.set("view engine", "ejs");
-  app.set("views", path.join(__dirname, "views"));
+  app.set("views", [path.join(__dirname, "views", 'ebook'), path.join(__dirname, "views")]);
   app.use(express.static(path.join(__dirname, "public")));
 };
 
-// Route handlers
+// ========== GLOBAL VARIABLES MIDDLEWARE ==========
+app.use((req, res, next) => {
+    res.locals.currentPath = req.path;
+    res.locals.success = req.query.success;
+    res.locals.error = req.query.error;
+    res.locals.user = req.user || req.session.user || null;
+    res.locals.basePath = '/ebook';
+    next();
+});
+
+// ========== INITIALIZE SECURITY STORAGE ==========
+app.locals.securityEvents = new Map();
+app.locals.pdfTokens = new Map();
+
+// ========== EBOOK ROUTES ==========
+app.use('/ebook', require('./routes/pdfRoutes'));
+app.use('/ebook', require('./routes/authebookRoutes'));
+
+// ========== MAIN APPLICATION ROUTES ==========
 const configureRoutes = () => {
   // API Routes
-  const bookRoutes = require("./routes/bookRoutes");
   const organisationRoutes = require("./routes/organisation");
   const userRoutes = require("./routes/userRoutes");
   const authRoutes = require("./routes/authRoutes");
   const adminRoutes = require("./routes/admin");
   const verifyRoutes = require("./routes/verify");
-  const excelRoutes = require("./routes/excelRoutes");
   const authenticateJWT = require("./middleware/authMiddleware");
+
+  // ========== CERTIFICATE ROUTES ==========
+  const applicationRoutes = require("./routes/applicationRoutes");
+  app.use("/api", applicationRoutes);
 
   app.use("/user", userRoutes);
   app.use("/auth", authRoutes);
   app.use("/admin", adminRoutes);
   app.use("/verify", verifyRoutes);
-  app.use("/api/excel", excelRoutes);
   app.use("/api/organisation", organisationRoutes);
-  app.use("/ebook", bookRoutes);
   app.use("/api/user", userRoutes);
 
-  // RTS Integration
+  // ========== SECURE PDF ACCESS ==========
+  app.use('/ebook/uploads/pdfs', (req, res, next) => {
+      const referer = req.get('Referer');
+      if (!referer || (!referer.includes('/ebook/secure-viewer/') && !referer.includes('/ebook/download/'))) {
+          return res.status(403).json({ 
+              error: 'Access denied',
+              message: 'Direct file access is not allowed. Please use the secure viewer.'
+          });
+      }
+      next();
+  });
+
+  // ========== RTS INTEGRATION ==========
   app.use("/RTS/public", express.static(path.join(__dirname, "RTS", "public")));
   app.use("/rts", express.static(path.join(__dirname, "RTS", "public")));
   
@@ -89,7 +171,7 @@ const configureRoutes = () => {
     res.sendFile(path.join(__dirname, "RTS", "public", "main.html"));
   });
 
-  // View Routes
+  // ========== VIEW ROUTES ==========
   const Organisation = require("./models/Organisation");
   const Book = require("./models/Book");
 
@@ -135,7 +217,7 @@ const configureRoutes = () => {
     }
   });
 
-  // Static HTML Routes
+  // ========== STATIC HTML ROUTES ==========
   const roleMiddleware = (role) => (req, res, next) => {
     if (req.user && req.user.role === role) return next();
     res.redirect("/login");
@@ -185,10 +267,6 @@ const configureRoutes = () => {
     res.sendFile(path.join(__dirname, "public", "index.html"));
   });
 
-  app.get("/ebook", (req, res) => {
-    res.sendFile(path.join(__dirname, "public", "ebook.html"));
-  });
-
   app.get("/searchResult", (req, res) => {
     res.sendFile(path.join(__dirname, "public", "searchResult.html"));
   });
@@ -196,21 +274,20 @@ const configureRoutes = () => {
   app.get("/serverpdf", (req, res) => {
     res.sendFile(path.join(__dirname, "public", "serverpdf.html"));
   });
-//=================== Certificate Routes ========================
 
-  const applicationRoutes = require("./routes/applicationRoutes");
-app.use("/api", applicationRoutes);
+  // ========== CERTIFICATE STATIC ROUTES ==========
+  app.get("/certificate", (req, res) => {
+    res.sendFile(path.join(__dirname, "public", "Certificate-Verification/certificate.html"));
+  });
 
-// Add these routes in the static routes section:
+  app.get("/apply-certificate", (req, res) => {
+    res.sendFile(path.join(__dirname, "public", "Certificate-Verification/Applay-certificate.html"));
+  });
 
-app.get("/certificate", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "Certificate-Verification/certificate.html"));
-});
+  app.get("/ebook", (req, res) => {
+    res.sendFile(path.join(__dirname, "public", "ebook.html"));
+  });
 
-app.get("/apply-certificate", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "Certificate-Verification/Applay-certificate.html"));
-});
-  //==============================================
   app.get("/get-pdf", (req, res) => {
     const pdfPath = path.join(__dirname, "ebookdata", "azenglish.pdf");
     const pdfStream = fs.createReadStream(pdfPath);
@@ -219,7 +296,7 @@ app.get("/apply-certificate", (req, res) => {
     pdfStream.pipe(res);
   });
 
-  // Logout route
+  // ========== LOGOUT ROUTE ==========
   app.get("/logout", (req, res) => {
     if (req.session) {
       req.session.destroy((err) => {
@@ -231,7 +308,7 @@ app.get("/apply-certificate", (req, res) => {
     }
   });
 
-  // Duration API
+  // ========== DURATION API ==========
   app.get("/api/duration", (req, res) => {
     const duration = process.env.DURATION;
     if (!duration)
@@ -239,18 +316,21 @@ app.get("/apply-certificate", (req, res) => {
     res.json({ duration });
   });
 
-  // Catch-all 404
+  // ========== CATCH-ALL 404 ==========
   app.use((req, res) => {
     res.status(404).sendFile(path.join(__dirname, "public", "404/404.html"));
   });
 };
 
-// Configure the application
+// ========== CONFIGURE THE APPLICATION ==========
 configureMiddleware();
 configureViews();
 configureRoutes();
 
-// Start Server
+// ========== START SERVER ==========
 app.listen(port, () => {
   console.log(`\n✅ Server is running on http://localhost:${port}`);
+  console.log(`📚 Ebook section: http://localhost:${port}/ebook`);
+  console.log(`📜 Certificate section: http://localhost:${port}/certificate`);
+  console.log(`📝 Apply certificate: http://localhost:${port}/apply-certificate`);
 });
