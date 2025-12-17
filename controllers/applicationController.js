@@ -473,19 +473,7 @@ async function generateCompletionCertificatePDF(app, filePath) {
 
       // ===== SIGNATURE SECTION =====
   const signatureY = 560;
-
-// ✅ SIGNATURE IMAGE
-drawImageSafe(
-  doc,
-  signatureImagePath,
-  100,
-  signatureY - 35,
-  { width: 120 }
-);
-
-
-      
-      // Random names array
+   // Random names array
       const randomNames = [
         "Er. Rajesh Prasad",
         "Er. Deepak Kumar"
@@ -519,17 +507,6 @@ drawImageSafe(
            width: 150,
            align: 'center'
          });
-// ===== ADD STAMP IMAGE (NO CODE REMOVED) =====
-if (fs.existsSync(stampImagePath)) {
-  doc.image(
-    stampImagePath,
-    doc.page.width - 170,
-    signatureY + 10,
-    {
-      width: 90
-    }
-  );
-}
 
       // Draw stamp circle
       doc.strokeColor('#dc2626').lineWidth(2)
