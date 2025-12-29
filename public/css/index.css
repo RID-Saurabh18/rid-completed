@@ -2490,6 +2490,7 @@ footer {
     max-width: 100%;
     width: 100%;
     justify-content: center;
+    margin-top: 10px;
   }
 }
 
